@@ -1,0 +1,9 @@
+# Lokalna konfiguracja z hasłami - szablon w repo to cfg.example.py
+cfg.py
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Firmware MicroPythona - nie wersjonujemy binariów
+*.bin

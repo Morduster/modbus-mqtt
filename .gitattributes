@@ -1,0 +1,2 @@
+# Pliki lecą na MicroPythona - trzymamy końce linii LF niezależnie od systemu
+* text=auto eol=lf
