@@ -234,7 +234,7 @@ silently lose the history.
 `<TOPIC_DISCOVERY>` every 60 seconds, `retain=False`:
 
 ```json
-{"name": "deye_ddeeff", "ip": "192.168.63.99", "uptime": 7, "ts": 1787028801}
+{"name": "deye_ddeeff", "ip": "192.168.1.42", "uptime": 7, "ts": 1787028801}
 ```
 
 ### Commands

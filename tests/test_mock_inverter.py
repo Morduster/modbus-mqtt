@@ -169,7 +169,7 @@ class FakeWLAN:
     def isconnected(self): return self._on
     def connect(self, *a): self._on = True
     def disconnect(self): pass
-    def ifconfig(self): return ("192.168.63.99", "255.255.255.0", "192.168.63.1", "8.8.8.8")
+    def ifconfig(self): return ("192.168.1.42", "255.255.255.0", "192.168.1.1", "8.8.8.8")
     def status(self, what=None): return -55
 
 fake_network = types.ModuleType("network")
@@ -547,7 +547,9 @@ main._write_requests.append({"name": cfg.DEVID, "reg": 145, "value": 1234})   # 
 main._write_requests.append({"name": cfg.DEVID, "reg": 999, "value": 1})      # NIE na whitelicie
 LOOP.run_until_complete(main.handle_write_requests())
 
-results = []
+# Wyniki moga byc juz opublikowane przez zywy mqtt_manager albo jeszcze siedziec
+# w kolejce - zbieramy z obu miejsc, inaczej test zalezy od wyscigu.
+results = [p for t, p, _ in published if "write_result" in t]
 while True:
     try:
         topic, payload, retain = main.publish_queue.get_nowait()
