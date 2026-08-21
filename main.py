@@ -58,15 +58,34 @@ state = {
     "publish_errors": 0,
 }
 
-# Nazwy pól zajmujących jeden rejestr - tylko one dostają stary topik
+# Adresy pól zajmujących jeden rejestr - tylko one mogą dostać stary topik
 # <TOPIC_BASE>/regs/<numer>, bo wartości 32-bitowe historycznie leciały tam
 # jako osobne, surowe słowa low/high.
-_single_reg_fields = set()
+_single_reg_addrs = set()
 for _block in BLOCKS:
+    _off = 0
     for _field in _block["fields"]:
         if _field[0] and registers.REG_WIDTH[_field[1]] == 1:
-            _single_reg_fields.add(_field[0])
-del _block, _field
+            _single_reg_addrs.add(_block["start"] + _off)
+        _off += registers.REG_WIDTH[_field[1]]
+del _block, _field, _off
+
+
+def _legacy_wanted(address):
+    """Czy dla tego rejestru publikować też stary topik regs/<numer>.
+
+    LEGACY_REG_TOPICS bywa listą adresów (publikuj tylko te), True (wszystkie
+    jednorejestrowe pola, dawne zachowanie) albo False. Lista jest tu domyślna,
+    bo mapa rejestrów zdążyła spuchnąć i publikowanie wszystkiego podwoiłoby
+    liczbę wiadomości dla topików, których nikt nie czyta.
+    """
+    if address not in _single_reg_addrs:
+        return False
+    if LEGACY_REG_TOPICS is True:
+        return True
+    if not LEGACY_REG_TOPICS:
+        return False
+    return address in LEGACY_REG_TOPICS
 
 
 # ---------- czas i uptime ----------
@@ -161,7 +180,7 @@ class LatestQueue:
     w nieskończoność, bo liczba topików jest z góry znana.
     """
 
-    def __init__(self, limit=64):
+    def __init__(self, limit=160):
         self._items = {}        # topic -> (payload, retain)
         self._order = []        # FIFO topików (MicroPython nie gwarantuje kolejności dict)
         self._limit = limit
@@ -560,7 +579,7 @@ def publish_field(name, address, value, unit, desc):
 
     # Zgodność w tył: stary topik i stary kształt payloadu. Do wyłączenia
     # flagą LEGACY_REG_TOPICS, gdy konsumenci przejdą na nazwy pól.
-    if LEGACY_REG_TOPICS and name in _single_reg_fields:
+    if _legacy_wanted(address):
         enqueue("%s/regs/%d" % (TOPIC_BASE, address),
                 {"value": value, "timestamp": time.time(), "unit": unit, "desc": desc})
 

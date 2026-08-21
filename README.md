@@ -33,11 +33,16 @@ Reading them as two separate Modbus requests is legal, but wrong in two ways:
    collide with something.
 
 So the register map is organised into **blocks of contiguous addresses**, and
-each block is fetched with a single `0x03` request. That takes this
-installation from 15 transactions per pass down to 5, and each 32-bit value now
-comes from one snapshot. Each block also has its own poll period: energy
-counters every 15 minutes, live power every 20 seconds — roughly 200
-transactions per hour instead of 4300.
+each block is fetched with a single `0x03` request. Each 32-bit value now comes
+from one snapshot, and 34 published fields cost **7 transactions per pass**
+instead of one per register. Each block also carries its own poll period: energy
+counters every 15 minutes, temperatures and fault words every 5, live power
+every 20 seconds — about **750 transactions per hour** for the whole map.
+
+There is a corollary worth remembering when extending the map: a register that
+sits next to one already being read joins that block and costs nothing at all.
+Battery temperature, voltage and current came in that way, next to the SOC and
+power registers already in the 586 block.
 
 If your inverter still locks up, raise the `period` values in `registers.py`
 first; that is the knob that matters.
@@ -109,6 +114,13 @@ registers and assume Deye's low-word-first order. Use `None` as the name to
 skip a register that sits in the middle of a block (register 589 is such a
 hole). `scale` multiplies the raw value — `0.1` for Deye's `0.1 kWh` counters.
 
+An optional sixth element is an offset subtracted before scaling, so the value
+is `(raw - offset) * scale`. Deye's temperatures need it:
+
+```python
+("battery_temp", "u16", 0.1, "°C", "Battery temperature", 1000),
+```
+
 ## MQTT
 
 ### Measurements
@@ -124,29 +136,66 @@ immediately sees the last known state:
 and appears only after a successful NTP sync — without it, stamp the data with
 the receiver's own clock.
 
-| MQTT topic | Modbus reg | Type | Unit | Poll | Description |
+| MQTT topic | Modbus reg | Type | Unit | Poll | Deye's own name |
 |---|---|---|---|---|---|
 | `battery_charge_today` | 514 | u16 | kWh | 900 s | Today charge of the battery |
 | `battery_discharge_today` | 515 | u16 | kWh | 900 s | Today discharge of the battery |
 | `battery_charge_total` | 516+517 | u32 | kWh | 900 s | Total charge of the battery |
 | `battery_discharge_total` | 518+519 | u32 | kWh | 900 s | Total discharge of the battery |
-| `load_energy_total` | 527+528 | u32 | kWh | 900 s | Total load energy |
+| `grid_import_today` | 520 | u16 | kWh | 900 s | Day_GridBuy_Power Wh |
+| `grid_export_today` | 521 | u16 | kWh | 900 s | Day_GridSell_Power Wh |
+| `grid_import_total` | 522+523 | u32 | kWh | 900 s | Total_GridBuy_Power Wh |
+| `grid_export_total` | 524+525 | u32 | kWh | 900 s | Total_GridSell_Power Wh |
+| `load_energy_today` | 526 | u16 | kWh | 900 s | Day_Load_Power Wh |
+| `load_energy_total` | 527+528 | u32 | kWh | 900 s | Total_Load_Power Wh |
+| `pv_energy_today` | 529 | u16 | kWh | 900 s | Day_PV_Power Wh |
+| `pv1_energy_today` | 530 | u16 | kWh | 900 s | Day_PV-1_Power Wh |
+| `pv2_energy_today` | 531 | u16 | kWh | 900 s | Day_PV-2_Power Wh |
+| `pv_energy_total` | 534+535 | u32 | kWh | 900 s | Total PV_power Wh |
+| `inverter_dc_temp` | 540 | u16 | °C | 300 s | DC transformer temperature |
+| `inverter_heatsink_temp` | 541 | u16 | °C | 300 s | Heat sink temperature |
+| `warning_word_1` | 553 | u16 | bits | 300 s | Warning message word 1 |
+| `warning_word_2` | 554 | u16 | bits | 300 s | Warning message word 2 |
+| `fault_word_1` | 555 | u16 | bits | 300 s | Fault information word 1 |
+| `fault_word_2` | 556 | u16 | bits | 300 s | Fault information word 2 |
+| `fault_word_3` | 557 | u16 | bits | 300 s | Fault information word 3 |
+| `fault_word_4` | 558 | u16 | bits | 300 s | Fault information word 4 |
+| `battery_temp` | 586 | u16 | °C | 20 s | Battery temperature |
+| `battery_voltage` | 587 | u16 | V | 20 s | Battery voltage |
 | `battery_soc` | 588 | u16 | % | 20 s | Battery capacity (SOC) |
-| `battery_power` | 590 | s16 | W | 20 s | Battery output power (positive = discharging) |
+| `battery_power` | 590 | s16 | W | 20 s | Battery output power (dodatnie = rozładowanie) |
+| `battery_current` | 591 | s16 | A | 20 s | Battery output current |
+| `grid_power` | 625 | s16 | W | 20 s | Grid side total power |
 | `load_power_l1` | 650 | s16 | W | 20 s | Load phase power A |
 | `load_power_l2` | 651 | s16 | W | 20 s | Load phase power B |
 | `load_power_l3` | 652 | s16 | W | 20 s | Load phase power C |
+| `load_power` | 653 | s16 | W | 20 s | Load totalpower |
 | `pv1_power` | 672 | u16 | W | 20 s | PV1 input power |
 | `pv2_power` | 673 | u16 | W | 20 s | PV2 input power |
 
-Register numbers and units are taken from Deye's *Modbus protocol* document
-(the modbus register table shipped with the inverter). The document is not
-redistributed here.
+Register numbers, units and the rightmost column are taken from Deye's *Modbus
+protocol* document (the register table shipped with the inverter). The document
+is not redistributed here.
 
-With `LEGACY_REG_TOPICS = True` every single-register field is additionally
-published under `<TOPIC_BASE>/regs/<number>` in the older payload shape, so
-existing consumers keep working during a migration. Turn it off once they use
-the named topics.
+Two things about that table are worth knowing. Registers 520-535 are named
+`..._Power` by Deye, but the unit column says `0.1kWh` — they are **energy**
+counters. The topic names say what the value is; Deye's own name is kept in the
+table above and in the code's `desc` so you can find the row in the PDF.
+And temperatures are encoded with an offset of 1000, so `°C = (raw - 1000) / 10`
+— a field may declare that offset as an optional sixth element.
+
+The daily counters roll over at the **inverter's** midnight, not yours, which is
+one practical reason to keep its clock in sync (see below). And when you reconcile
+the grid counters against a utility bill, expect a few percent of disagreement:
+the inverter measures with its own CT at a different point in the installation
+than the utility meter.
+
+`LEGACY_REG_TOPICS` additionally publishes single-register fields under
+`<TOPIC_BASE>/regs/<number>` in an older payload shape, so existing consumers
+keep working during a migration. It takes a list of addresses (publish only
+those — the default), `True` (every single-register field) or `False`. Keep it a
+short list: the register map is large enough that mirroring all of it would
+double the message count for topics nobody reads.
 
 ### Diagnostics
 

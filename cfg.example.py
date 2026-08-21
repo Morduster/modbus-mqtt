@@ -29,9 +29,11 @@ TOPIC_DISCOVERY = "cave/discovery"
 TOPIC_CMD_REBOOT = "cave/cfg/reboot/now"    # {"name": "<DEVID>"}
 TOPIC_CMD_WRITE = "cave/cfg/deye/write"     # {"name": "<DEVID>", "reg": 145, "value": 1}
 
-# Publikuj też stare topiki <TOPIC_BASE>/regs/<numer_rejestru> ze starym
-# kształtem payloadu. Ustaw False, gdy wszyscy konsumenci przejdą na nazwy.
-LEGACY_REG_TOPICS = True
+# Stare topiki <TOPIC_BASE>/regs/<numer_rejestru> ze starym kształtem payloadu,
+# na czas migracji konsumentów na nazwy pól. Lista adresów = publikuj tylko te
+# (domyślnie cztery, które realnie ktoś czytał), True = wszystkie pola
+# jednorejestrowe, False = żadne. Po przepięciu konsumentów ustaw False.
+LEGACY_REG_TOPICS = (588, 590, 672, 673)
 
 # ---------- RS485 / Modbus ----------
 UART_ID = 1

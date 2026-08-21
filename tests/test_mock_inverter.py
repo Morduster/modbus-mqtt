@@ -61,7 +61,23 @@ DEYE_REGS = {
     589: 0,
     590: 0xFE70,       # -400 W (ladowanie)
     650: 1200, 651: 800, 652: 0xFC18,   # L3 = -1000 W
+    653: 1000,         # moc calkowita obciazenia
     672: 2500, 673: 1800,
+
+    530: 80, 531: 65,               # PV1/PV2 dzis: 8.0 / 6.5 kWh
+    534: 40000, 535: 0x0001,        # PV total = 105536 -> 10553.6 kWh
+    520: 150, 521: 300,             # grid import/export dzis: 15.0 / 30.0 kWh
+    522: 20000, 523: 0x0000,        # grid import total = 2000.0 kWh
+    524: 60000, 525: 0x0001,        # grid export total = 125536 -> 12553.6 kWh
+    526: 220,                       # obciazenie dzis 22.0 kWh
+    529: 145,                       # PV dzis 14.5 kWh
+
+    540: 1355, 541: 1422,           # temperatury falownika: 35.5 / 42.2 C
+    553: 0, 554: 0, 555: 0, 556: 0, 557: 0, 558: 0,
+    586: 1183,                      # temperatura baterii 18.3 C
+    587: 5120,                      # napiecie baterii 51.20 V
+    591: 0xF060,                    # prad baterii -40.96 A (0.01A, S16)
+    625: 0xF830,                    # moc na przylaczu -2000 W (oddawanie)
 }
 
 # Zegar falownika (62-64) ustawiony 5 minut ZA czasem lokalnym - ma wywolac korekte
@@ -73,7 +89,7 @@ DEYE_REGS[63] = (_drifted.tm_mday << 8) | _drifted.tm_hour
 DEYE_REGS[64] = (_drifted.tm_min << 8) | _drifted.tm_sec
 
 # Blok, ktory ma nie odpowiadac - test sciezki bledu i ponowienia
-DEAD_BLOCK_START = 650
+DEAD_BLOCK_START = 553   # blok ostrzezen: symulacja braku odpowiedzi
 
 stats = {"requests": [], "dead_hits": 0, "writes": []}
 
@@ -356,8 +372,44 @@ check(vals.get("cave/deye/params/load_energy_total") == 16107.2, f"load_energy_t
 check(vals.get("cave/deye/params/pv1_power") == 2500, "pv1_power != 2500")
 check(vals.get("cave/deye/params/battery_charge_today") == 12.3, "battery_charge_today != 12.3")
 
+# temperatury: Deye koduje je z offsetem 1000, wiec (raw - 1000) / 10
+check(vals.get("cave/deye/params/inverter_dc_temp") == 35.5,
+      f"inverter_dc_temp = {vals.get('cave/deye/params/inverter_dc_temp')} (oczekiwano 35.5, raw 1355)")
+check(vals.get("cave/deye/params/inverter_heatsink_temp") == 42.2,
+      f"inverter_heatsink_temp = {vals.get('cave/deye/params/inverter_heatsink_temp')}")
+check(vals.get("cave/deye/params/battery_temp") == 18.3,
+      f"battery_temp = {vals.get('cave/deye/params/battery_temp')} (oczekiwano 18.3, raw 1183)")
+# bez offsetu wyszloby 135.5 zamiast 35.5 - dokladnie ten blad ma to lapac
+check(vals.get("cave/deye/params/inverter_dc_temp") != 135.5, "offset temperatury nie zadzialal")
+
+check(vals.get("cave/deye/params/battery_voltage") == 51.2, "battery_voltage != 51.2")
+check(vals.get("cave/deye/params/battery_current") == -40.0,
+      f"battery_current = {vals.get('cave/deye/params/battery_current')} (oczekiwano -40.0, s16 * 0.01)")
+check(vals.get("cave/deye/params/grid_power") == -2000,
+      f"grid_power = {vals.get('cave/deye/params/grid_power')} (oczekiwano -2000, oddawanie)")
+check(vals.get("cave/deye/params/load_power") == 1000, "load_power (653) != 1000")
+
+# liczniki energii do rozliczen z faktura
+check(vals.get("cave/deye/params/pv_energy_total") == 10553.6,
+      f"pv_energy_total = {vals.get('cave/deye/params/pv_energy_total')}")
+check(vals.get("cave/deye/params/grid_import_total") == 2000.0,
+      f"grid_import_total = {vals.get('cave/deye/params/grid_import_total')}")
+check(vals.get("cave/deye/params/grid_export_total") == 12553.6,
+      f"grid_export_total = {vals.get('cave/deye/params/grid_export_total')}")
+check(vals.get("cave/deye/params/grid_import_today") == 15.0, "grid_import_today != 15.0")
+check(vals.get("cave/deye/params/pv_energy_today") == 14.5, "pv_energy_today != 14.5")
+
+# stare nazwy Deye ("...Power" dla licznikow energii) nie moga wrocic
+for zla in ("day_gridbuy_power", "total_gridbuy_power", "day_load_power", "day_pv_power"):
+    check("cave/deye/params/" + zla not in vals, f"zostala nazwa producenta: {zla}")
+
+# stare topiki tylko dla czterech realnie czytanych rejestrow
+legacy = [t for t in last if "/regs/" in t]
+check(sorted(legacy) == sorted("cave/deye/params/regs/%d" % r for r in (588, 590, 672, 673)),
+      f"lista starych topikow rozjechala sie: {sorted(legacy)}")
+
 # martwy blok 650 nie moze sie opublikowac ani zablokowac reszty
-check("cave/deye/params/load_power_l1" not in vals, "martwy blok 650 opublikowal wartosc")
+check("cave/deye/params/warning_word_1" not in vals, "martwy blok 553 opublikowal wartosc")
 check(stats["dead_hits"] >= 2, f"martwy blok odpytany tylko {stats['dead_hits']} raz - ponowienie nie dziala")
 
 # stare topiki dla zgodnosci w tyl
@@ -367,10 +419,12 @@ check("cave/deye/params/regs/516" not in last, "regs/516 nie powinien istniec (p
 
 # jedno zapytanie na blok, nie po jednym rejestrze
 reqs = set(stats["requests"])
-check((514, 6) in reqs, f"blok 514 nie czytany jako 6 rejestrow: {reqs}")
-check((527, 2) in reqs, "blok 527 nie czytany jako 2 rejestry")
-check((588, 3) in reqs, "blok 588 nie czytany jako 3 rejestry")
-check(not any(c == 1 for _, c in reqs), f"sa zapytania o pojedyncze rejestry: {reqs}")
+check((588, 3) not in reqs, "blok baterii nadal czytany od 588 - temperatura pominieta")
+check((586, 6) in reqs, f"blok baterii nie czytany jako 586+6: {sorted(reqs)}")
+check((514, 22) in reqs, f"blok energii nie czytany jako 514+22: {sorted(reqs)}")
+check((650, 4) in reqs, "blok obciazenia nie obejmuje mocy calkowitej (653)")
+# 22 licznikow energii MUSI zmiescic sie w jednym zapytaniu, nie po jednym
+check(len(reqs) <= 8, f"za duzo osobnych zakresow odczytu: {sorted(reqs)}")
 
 # diagnostyka i watchdog
 diag = [p for t, (p, _) in last.items() if t == "%s/%s" % (cfg.TOPIC_DIAG, cfg.DEVID)]
@@ -379,7 +433,9 @@ if diag:
     d = diag[0]
     check(d["blocks_failed"] > 0, "diag nie policzyl nieudanego bloku")
     check(d["modbus"]["timeout"] > 0, "diag nie policzyl timeoutu Modbusa")
-    check(d["queue_len"] < 20, f"kolejka rosnie: {d['queue_len']}")
+    check(d["queue_len"] < 40, f"kolejka rosnie: {d['queue_len']}")
+    check(d["queue_dropped"] == 0, f"kolejka gubi wiadomosci: {d['queue_dropped']} "
+                                  f"- limit LatestQueue za maly na te mape rejestrow")
 check(FakeWDT.instances and FakeWDT.instances[0].feeds > 0, "watchdog nie byl karmiony")
 
 # ------------------------------------------------------- licznik resetow
