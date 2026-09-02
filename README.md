@@ -1,4 +1,7 @@
-# deyemqtt — Deye inverter → MQTT bridge on ESP32-S3
+# Deye inverter → MQTT over RS485 with ESP32-S3
+
+Read data directly from a Deye hybrid inverter via RS485/Modbus RTU 
+and publish it to MQTT using an ESP32-S3. No cloud, no Solarman, no Raspberry Pi required.
 
 MicroPython firmware that reads a Deye hybrid inverter over RS485 (Modbus RTU)
 and publishes the values to an MQTT broker as JSON. It has been running
@@ -15,6 +18,23 @@ the inverter's own clock from drifting.
 │  Deye    │◄──────────►│ ESP32-S3 │◄─────────►│ MQTT broker│
 │ inverter │  Modbus RTU│ deyemqtt │   JSON    │  (Mosquitto)│
 └──────────┘   9600 8N1 └──────────┘           └────────────┘
+```
+
+```
+Deye Hybrid Inverter
+        │
+        │ RS485 / Modbus RTU
+        ▼
+    ESP32-S3
+   MicroPython
+        │
+        │ WiFi / MQTT
+        ▼
+   MQTT Broker
+        │
+        ├── Home Assistant
+        ├── Node-RED
+        └── Grafana
 ```
 
 ## Why block reads (the interesting part)
