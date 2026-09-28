@@ -1,18 +1,19 @@
-# modbusrtu.py - minimalny master Modbus RTU na UART (RS485) dla MicroPython
+# modbusrtu.py - минимальный мастер Modbus RTU по UART (RS485) для MicroPython
 # https://github.com/pradki/deye-modbus-mqtt
 #
-# Obsługuje funkcje 0x03 (read holding registers), 0x06 (write single register)
-# i 0x10 (write multiple registers). Zaprojektowany pod jednego mastera i jeden
-# slave na magistrali, bez retransmisji - ponowna próba należy do warstwy wyżej.
+# Поддерживает функции 0x03 (чтение регистров), 0x06 (запись одного регистра)
+# и 0x10 (запись нескольких регистров). Рассчитан на одного мастера и одного
+# ведомого на шине, без ретрансляции — повторная попытка относится к верхнему
+# слою.
 #
-# Ważne detale, które w praktyce decydują o stabilności łącza:
-#   * przed każdą transakcją czyścimy bufor RX - śmieci po poprzednim timeoucie
-#     rozjeżdżają następną ramkę i produkują fałszywe błędy CRC,
-#   * odpowiedź czytamy do znanej długości ramki, a nie tylko "do ciszy na
-#     łączu" - przy kilku taskach asyncio przerwa między bajtami potrafi urosnąć
-#     i ramka zostałaby ucięta w połowie,
-#   * sprawdzamy adres slave, kod funkcji i licznik bajtów, a ramkę wyjątku
-#     (kod funkcji z ustawionym bitem 0x80) raportujemy osobno.
+# Важные детали, которые на практике определяют устойчивость связи:
+#   * перед каждой транзакцией чистим буфер RX — мусор после предыдущего
+#     таймаута разъезжается со следующим кадром и даёт ложные ошибки CRC,
+#   * ответ читаем до известной длины кадра, а не только «до тишины на
+#     линии» — при нескольких задачах asyncio пауза между байтами может
+#     вырасти, и кадр оказался бы обрезан на середине,
+#   * проверяем адрес ведомого, код функции и счётчик байт, а кадр исключения
+#     (код функции с установленным битом 0x80) сообщаем отдельно.
 
 import uasyncio as asyncio
 import time
@@ -33,34 +34,38 @@ FC_READ_HOLDING = 0x03
 FC_WRITE_SINGLE = 0x06
 FC_WRITE_MULTIPLE = 0x10
 
-# Maksymalna liczba rejestrów w jednym zapytaniu 0x03 (limit protokołu: 125)
-MAX_REGS_PER_READ = 125
+# Максимальное число регистров в одном запросе 0x03.
+# Протокол Modbus допускает 125, но SW-2200A+ отвечает максимум на 8
+# регистров за раз — большие запросы отбрасываются (исключения). Все блоки
+# в registers.py укладываются в этот лимит (следит за этим registers._validate).
+MAX_REGS_PER_READ = 8
 
-# Odstęp między nadaniem zapytania a rozpoczęciem nasłuchu. Daje falownikowi
-# czas na przełączenie kierunku transmisji i opróżnienie naszego bufora TX.
+# Интервал между отправкой запроса и началом приёма. Даёт инвертору время
+# переключить направление передачи и освободить наш буфер TX.
 TURNAROUND_MS = 20
 
-# Cisza na łączu uznawana za koniec ramki. Dla 9600 baud 3.5 znaku to ~4 ms,
-# ale przy współbieżnych taskach asyncio taki próg jest zbyt agresywny.
+# Тишина на линии, считаемая концом кадра. Для 9600 бод 3.5 символа — это
+# ~4 мс, но при параллельных задачах asyncio такой порог слишком агрессивен.
 SILENCE_MS = 10
 
-# Licznik zdarzeń - publikowany przez main.py na topiku diagnostycznym.
+# Счётчик событий — публикуется main.py в диагностическом топике.
 stats = {
-    "ok": 0,          # poprawne odpowiedzi
-    "timeout": 0,     # brak odpowiedzi w zadanym czasie
-    "crc": 0,         # zła suma kontrolna
-    "exception": 0,   # falownik odpowiedział ramką wyjątku
-    "malformed": 0,   # zły adres / kod funkcji / długość
+    "ok": 0,          # правильные ответы
+    "timeout": 0,     # нет ответа за отведённое время
+    "crc": 0,         # неверная контрольная сумма
+    "exception": 0,   # инвертор ответил кадром исключения
+    "malformed": 0,   # неверный адрес / код функции / длина
 }
 
-# Opcjonalny hook do sygnalizacji (np. mrugnięcie diodą). main.py podstawia
-# tu własną funkcję. Musi być nieblokująca - jest wołana w ścieżce Modbusa.
+# Необязательный хук для сигнализации (например, вывод на экран). main.py
+# подставляет сюда свою функцию. Должен быть неблокирующим — вызывается
+# в тракте Modbus.
 on_event = None
 
 uart = UART(UART_ID, baudrate=UART_BAUDRATE, tx=UART_TX_PIN, rx=UART_RX_PIN)
 
-# Magistrala jest jedna, a chętnych kilku (odpytywanie, zapisy z MQTT,
-# synchronizacja zegara). Blokada trzyma parę zapytanie-odpowiedź razem.
+# Шина одна, а желающих несколько (опрос, записи из MQTT, синхронизация
+# часов). Блокировка держит пару запрос-ответ вместе.
 _bus = asyncio.Lock()
 
 _de = None
@@ -77,7 +82,7 @@ def _notify(event):
 
 
 def crc16(data):
-    """CRC16 Modbus. Zwraca int; w ramce idzie little-endian."""
+    """CRC16 Modbus. Возвращает int; в кадре идёт little-endian."""
     crc = 0xFFFF
     for b in data:
         crc ^= b
@@ -90,12 +95,12 @@ def crc16(data):
 
 
 def _frame(body):
-    """Dokłada CRC do ciała ramki."""
+    """Добавляет CRC к телу кадра."""
     return bytes(body) + ustruct.pack("<H", crc16(body))
 
 
 def flush_rx():
-    """Wyrzuca wszystko, co zaległo w buforze odbiorczym."""
+    """Выбрасывает всё, что скопилось в буфере приёма."""
     dropped = 0
     while uart.any():
         chunk = uart.read()
@@ -110,7 +115,7 @@ def _write(frame):
         _de.value(1)
     uart.write(frame)
     if _de is not None:
-        # trzeba poczekać, aż bajty faktycznie wyjdą, inaczej urwiemy koniec ramki
+        # нужно дождаться реальной отправки байт, иначе обрежем конец кадра
         try:
             uart.flush()
         except AttributeError:
@@ -119,7 +124,7 @@ def _write(frame):
 
 
 async def _read_frame(expected_len, timeout_ms):
-    """Czyta ramkę odpowiedzi. Zwraca bytearray (może być niepełna) albo None."""
+    """Читает кадр ответа. Возвращает bytearray (возможно, неполный) или None."""
     buf = bytearray()
     start = time.ticks_ms()
     last = start
@@ -133,7 +138,7 @@ async def _read_frame(expected_len, timeout_ms):
             last = now
             if len(buf) >= expected_len:
                 return buf
-            # ramka wyjątku jest krótsza od normalnej odpowiedzi
+            # кадр исключения короче обычного ответа
             if len(buf) >= 5 and (buf[1] & 0x80):
                 return buf
         elif buf and time.ticks_diff(now, last) > SILENCE_MS:
@@ -146,11 +151,11 @@ async def _read_frame(expected_len, timeout_ms):
 
 
 def _check(frame, slave, fc):
-    """Waliduje ramkę odpowiedzi. Zwraca (payload, error_string)."""
+    """Проверяет кадр ответа. Возвращает (payload, строка_ошибки)."""
     if frame is None:
         return None, "timeout"
     if len(frame) < 5:
-        return None, "ramka za krótka (%d B)" % len(frame)
+        return None, "кадр слишком короткий (%d Б)" % len(frame)
 
     body = frame[:-2]
     crc_got = ustruct.unpack("<H", frame[-2:])[0]
@@ -159,20 +164,20 @@ def _check(frame, slave, fc):
         return None, "crc %04X != %04X" % (crc_got, crc_exp)
 
     if body[0] != slave:
-        return None, "adres slave %d, oczekiwano %d" % (body[0], slave)
+        return None, "адрес ведомого %d, ожидалось %d" % (body[0], slave)
 
     if body[1] == (fc | 0x80):
         code = body[2] if len(body) > 2 else 0
-        return None, "wyjatek modbus 0x%02X" % code
+        return None, "исключение modbus 0x%02X" % code
 
     if body[1] != fc:
-        return None, "kod funkcji 0x%02X, oczekiwano 0x%02X" % (body[1], fc)
+        return None, "код функции 0x%02X, ожидалось 0x%02X" % (body[1], fc)
 
     return body[2:], None
 
 
 async def _transact(slave, fc, body, expected_len, timeout_ms):
-    """Jedna transakcja: nadaj, odbierz, zwaliduj. Zwraca payload albo None."""
+    """Одна транзакция: отправить, принять, проверить. Возвращает payload или None."""
     async with _bus:
         flush_rx()
         _write(_frame(body))
@@ -190,20 +195,20 @@ async def _transact(slave, fc, body, expected_len, timeout_ms):
         stats["timeout"] += 1
     elif error.startswith("crc"):
         stats["crc"] += 1
-    elif error.startswith("wyjatek"):
+    elif error.startswith("исключение"):
         stats["exception"] += 1
     else:
         stats["malformed"] += 1
 
-    print("modbus: %s (fc=0x%02X, ramka=%s)" % (error, fc, frame))
+    print("modbus: %s (fc=0x%02X, кадр=%s)" % (error, fc, frame))
     _notify("error")
     return None
 
 
 async def read_registers(start_reg, num_regs, slave=None, timeout_ms=None):
-    """Funkcja 0x03. Zwraca listę surowych u16 albo None przy błędzie."""
+    """Функция 0x03. Возвращает список сырых u16 или None при ошибке."""
     if num_regs < 1 or num_regs > MAX_REGS_PER_READ:
-        raise ValueError("num_regs poza zakresem 1..%d" % MAX_REGS_PER_READ)
+        raise ValueError("num_regs вне диапазона 1..%d" % MAX_REGS_PER_READ)
 
     slave = MODBUS_SLAVE_ADDR if slave is None else slave
     timeout_ms = MODBUS_TIMEOUT_MS if timeout_ms is None else timeout_ms
@@ -219,7 +224,7 @@ async def read_registers(start_reg, num_regs, slave=None, timeout_ms=None):
     data = payload[1:]
     if byte_count != 2 * num_regs or len(data) < byte_count:
         stats["malformed"] += 1
-        print("modbus: licznik bajtów %d, oczekiwano %d (dane %d B)"
+        print("modbus: счётчик байт %d, ожидалось %d (данных %d Б)"
               % (byte_count, 2 * num_regs, len(data)))
         return None
 
@@ -227,7 +232,7 @@ async def read_registers(start_reg, num_regs, slave=None, timeout_ms=None):
 
 
 async def write_register(reg, value, slave=None, timeout_ms=None):
-    """Funkcja 0x06. Zwraca True, gdy falownik potwierdził zapis."""
+    """Функция 0x06. Возвращает True, когда инвертор подтвердил запись."""
     slave = MODBUS_SLAVE_ADDR if slave is None else slave
     timeout_ms = MODBUS_TIMEOUT_MS if timeout_ms is None else timeout_ms
 
@@ -239,19 +244,19 @@ async def write_register(reg, value, slave=None, timeout_ms=None):
     if payload is None:
         return False
 
-    # poprawna odpowiedź to echo adresu i wartości
+    # правильный ответ — эхо адреса и значения
     echo_reg, echo_val = ustruct.unpack(">HH", payload[:4])
     if echo_reg != reg or echo_val != raw:
         stats["malformed"] += 1
-        print("modbus: echo zapisu nie zgadza się (%d=%d)" % (echo_reg, echo_val))
+        print("modbus: эхо записи не совпадает (%d=%d)" % (echo_reg, echo_val))
         return False
     return True
 
 
 async def write_registers(start_reg, values, slave=None, timeout_ms=None):
-    """Funkcja 0x10 - zapis wielu kolejnych rejestrów. Zwraca True przy sukcesie."""
+    """Функция 0x10 - запись нескольких подряд идущих регистров. Возвращает True при успехе."""
     if not values or len(values) > 123:
-        raise ValueError("liczba wartości poza zakresem 1..123")
+        raise ValueError("число значений вне диапазона 1..123")
 
     slave = MODBUS_SLAVE_ADDR if slave is None else slave
     timeout_ms = MODBUS_TIMEOUT_MS if timeout_ms is None else timeout_ms
@@ -268,8 +273,8 @@ async def write_registers(start_reg, values, slave=None, timeout_ms=None):
     echo_reg, echo_cnt = ustruct.unpack(">HH", payload[:4])
     if echo_reg != start_reg or echo_cnt != len(values):
         stats["malformed"] += 1
-        print("modbus: echo zapisu blokowego nie zgadza się (%d x%d)" % (echo_reg, echo_cnt))
+        print("modbus: эхо блочной записи не совпадает (%d x%d)" % (echo_reg, echo_cnt))
         return False
     return True
 
-# end.
+# Конец файла.
